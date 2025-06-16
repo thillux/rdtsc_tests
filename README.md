@@ -43,3 +43,9 @@
  # Run with both options
  cargo run -- --hash --samples 500000 > output.bin
  ```
+
+### Analyze
+
+```
+ea_non_iid output.bin 8 -v
+```
