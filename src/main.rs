@@ -46,9 +46,37 @@ pub fn rdtsc() -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::similar_names)]
+#[inline(always)]
+#[must_use]
+pub fn rdtscp() -> u64 {
+    let eax: u32;
+    let edx: u32;
+
+    unsafe {
+        asm!(
+          "rdtscp",
+          lateout("eax") eax,
+          lateout("edx") edx,
+          options(nomem, nostack)
+        );
+    }
+
+    (u64::from(edx) << 32) | u64::from(eax)
+}
+
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn get_nstime() -> u64 {
-    rdtsc()
+    #[cfg(feature = "rdtscp")]
+    {
+        rdtscp()
+    }
+
+    #[cfg(not(feature = "rdtscp"))]
+    {
+        rdtsc()
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
