@@ -4,15 +4,18 @@ use std::arch::asm;
 #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
 use std::sync::LazyLock;
 
-use std::io::{self, Write};
-use sha3::{Digest, Sha3_256};
 use clap::Parser;
+use std::io::{self, Write};
+
+#[cfg(feature = "hash")]
+use sha3::{Digest, Sha3_256};
 
 /// A tool to collect entropy from CPU timing information
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Enable hashing operation during timing measurement
+    #[cfg(feature = "hash")]
     #[arg(short = 'H', long)]
     hash: bool,
 
@@ -80,7 +83,8 @@ fn calculate_min_entropy(counts: &[usize; 256], total_samples: usize) -> f64 {
     }
 
     // Find the maximum probability
-    let max_probability = counts.iter()
+    let max_probability = counts
+        .iter()
         .map(|&count| count as f64 / total_samples as f64)
         .fold(0.0, f64::max);
 
@@ -97,6 +101,7 @@ fn calculate_min_entropy(counts: &[usize; 256], total_samples: usize) -> f64 {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    #[cfg(feature = "hash")]
     let mut hasher = Sha3_256::new();
 
     let mut counts = [0usize; 256];
@@ -105,17 +110,19 @@ fn main() -> io::Result<()> {
     for _ in 0..total_samples {
         let a = get_nstime();
 
+        #[cfg(feature = "hash")]
         if args.hash {
             hasher.update(b"abc");
             let _ = hasher.finalize_reset();
         }
 
         let b = get_nstime();
-        if let Ok(diff) = u8::try_from((b - a)&0xFF) {
+
+        if let Ok(diff) = u8::try_from((b - a) & 0xFF) {
             io::stdout().write_all(&diff.to_ne_bytes())?;
             counts[diff as usize] += 1;
         } else {
-            println!("{b} {a} {}", b-a);
+            println!("{b} {a} {}", b - a);
         }
     }
 
