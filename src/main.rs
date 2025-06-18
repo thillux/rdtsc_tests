@@ -5,10 +5,21 @@ use std::arch::asm;
 use std::sync::LazyLock;
 
 use clap::Parser;
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    time::Instant,
+};
 
 #[cfg(feature = "hash")]
 use sha3::{Digest, Sha3_256};
+
+use std::fs;
+
+fn get_tsc_frequency_khz() -> Option<u64> {
+    let path = "/sys/devices/system/cpu/cpu0/tsc_freq_khz";
+    let contents = fs::read_to_string(path).ok()?;
+    contents.trim().parse::<u64>().ok()
+}
 
 /// A tool to collect entropy from CPU timing information
 #[derive(Parser, Debug)]
@@ -126,8 +137,32 @@ fn calculate_min_entropy(counts: &[usize; 256], total_samples: usize) -> f64 {
     -max_probability.log2()
 }
 
+fn measure_timer() {
+    let measure_iterations = 1_000_000;
+    let freq = match get_tsc_frequency_khz() {
+        Some(s) => (s as f64) * 1000.0,
+        None => 2800.0 * 1E6, // clock speed of my T470s. Change accordingly.
+    };
+
+    let begin = Instant::now();
+    for _ in 0..measure_iterations {
+        let _ = get_nstime();
+    }
+    let duration = (Instant::now() - begin).as_secs_f64();
+
+    let calls_per_sec = measure_iterations as f64 / duration;
+
+    eprintln!("get_nstime() calls per sec: {}", calls_per_sec);
+    eprintln!(
+        "estimated get_nstime() latency: {}",
+        freq as f64 / calls_per_sec
+    );
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    measure_timer();
 
     #[cfg(feature = "hash")]
     let mut hasher = Sha3_256::new();
