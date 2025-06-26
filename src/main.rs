@@ -15,6 +15,139 @@ use sha3::{Digest, Sha3_256};
 
 use std::fs;
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{__cpuid,__cpuid_count};
+
+fn print_cpuid_leaf(leaf: u32) {
+    let cpuid = unsafe { __cpuid(leaf) };
+    eprintln!("CPUID[0x{:08x}] = eax={:08x}, ebx={:08x}, ecx={:08x}, edx={:08x}",
+             leaf, cpuid.eax, cpuid.ebx, cpuid.ecx, cpuid.edx);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_tsc() -> bool {
+    let cpuid = unsafe { __cpuid(1) };
+    cpuid.edx & (1 << 4) != 0
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_invariant_tsc() -> bool {
+    // CPUID leaf 0x80000007 (Advanced Power Management Information)
+    // Bit 8 of EDX indicates "Invariant TSC"
+    let cpuid = unsafe { __cpuid(0x80000007) };
+    (cpuid.edx & (1 << 8)) != 0
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_rdtscp() -> bool {
+    // CPUID leaf 0x80000001, bit 27 of EDX indicates RDTSCP support
+    let cpuid = unsafe { __cpuid(0x80000001) };
+    (cpuid.edx & (1 << 27)) != 0
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_tsc_deadline_timer() -> bool {
+    // CPUID leaf 1, bit 24 of ECX indicates TSC deadline timer
+    let cpuid = unsafe { __cpuid(0x1) };
+    (cpuid.ecx & (1 << 24)) != 0
+}
+
+
+fn max_extended_leaf() -> u32 {
+    unsafe { __cpuid(0x80000000).eax }
+}
+
+fn tsc_frequency() -> Option<u64> {
+    let max_leaf = max_extended_leaf();
+    if max_leaf >= 0x15 {
+        let cpuid = unsafe { __cpuid_count(0x15, 0) };
+        let denom = cpuid.ebx;
+        let numer = cpuid.eax;
+        let freq = cpuid.ecx;
+
+        if denom != 0 && numer != 0 {
+            if freq != 0 {
+                // freq is the TSC frequency in Hz (optional)
+                Some(freq as u64)
+            } else {
+                // Estimate frequency: (numer / denom) * reference clock
+                // Reference clock is often 24 or 25 MHz (platform dependent)
+                // For now, return as undefined
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn has_virtual_tsc_scaling() -> bool {
+    let max_leaf = unsafe { __cpuid(0).eax };
+    if max_leaf >= 0x40000010 {
+        let cpuid = unsafe { __cpuid(0x40000010) };
+        cpuid.eax != 0
+    } else {
+        false
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn measure_monotonicity() -> bool {
+    // Very simple test: ensure RDTSC never goes backward in a tight loop
+    let mut last = unsafe { std::arch::x86_64::_rdtsc() };
+    for _ in 0..1_000_000 {
+        let current = unsafe { std::arch::x86_64::_rdtsc() };
+        if current < last {
+            return false;
+        }
+        last = current;
+    }
+    true
+}
+
+#[cfg(target_arch = "x86_64")]
+fn test_rdtsc() {
+    eprintln!("🧠 TSC & CPUID Analysis\n");
+
+    eprintln!("✅ TSC supported: {}", has_tsc());
+    eprintln!("✅ RDTSCP supported: {}", has_rdtscp());
+    eprintln!("✅ Invariant TSC: {}", has_invariant_tsc());
+    eprintln!("✅ TSC Deadline Timer: {}", has_tsc_deadline_timer());
+    eprintln!("✅ Virtual TSC scaling: {}", has_virtual_tsc_scaling());
+
+    match tsc_frequency() {
+        Some(freq) => eprintln!("✅ Reported TSC frequency: {} Hz", freq),
+        None => eprintln!("❓ TSC frequency unavailable or must be estimated manually"),
+    }
+
+    eprintln!("\n🔍 Raw CPUID dumps for reference:");
+    print_cpuid_leaf(0x1);           // Basic info
+    print_cpuid_leaf(0x80000001);    // RDTSCP support
+    print_cpuid_leaf(0x80000007);    // Invariant TSC
+    print_cpuid_leaf(0x15);          // TSC frequency info (if supported)
+    print_cpuid_leaf(0x40000010);    // Virtual TSC scaling (if on a VM)
+
+    let invariant = has_invariant_tsc();
+    eprintln!("  Invariant TSC: {}", invariant);
+
+    let rdtscp = has_rdtscp();
+    eprintln!("  RDTSCP supported: {}", rdtscp);
+
+    let deadline = has_tsc_deadline_timer();
+    eprintln!("  TSC Deadline Timer: {}", deadline);
+
+    let monotonic = measure_monotonicity();
+    eprintln!("  Monotonic in tight loop: {}", monotonic);
+
+    if invariant && rdtscp && deadline && monotonic {
+        eprintln!("\n✅ RDTSC is modern and stable.");
+    } else {
+        eprintln!("\n⚠️ RDTSC may be unstable or unsuitable for high-precision or entropy use.");
+    }
+}
+
 fn get_tsc_frequency_khz() -> Option<u64> {
     let path = "/sys/devices/system/cpu/cpu0/tsc_freq_khz";
     let contents = fs::read_to_string(path).ok()?;
@@ -161,6 +294,9 @@ fn measure_timer() {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    #[cfg(target_arch = "x86_64")]
+    test_rdtsc();
 
     measure_timer();
 
