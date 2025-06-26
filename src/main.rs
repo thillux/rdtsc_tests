@@ -68,6 +68,7 @@ fn tsc_frequency() -> Option<u64> {
 
         eprintln!("freq: {freq}, numer: {numer}, denom: {denom}");
 
+        // typically 25 or 100 MHz, change if necessary
         let base_freq = if freq != 0 { freq } else { 25_000_000u32 };
 
         if denom != 0 && numer != 0 {
