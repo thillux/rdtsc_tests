@@ -10,13 +10,33 @@ use std::{
     time::Instant,
 };
 
-#[cfg(feature = "hash")]
 use sha3::{Digest, Sha3_256};
-
-use std::fs;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{__cpuid, __cpuid_count};
+
+use libc::{CPU_SET, CPU_ZERO, cpu_set_t, pid_t, sched_setaffinity};
+use std::mem;
+
+/// Set CPU affinity of current thread to the given core (e.g., core 0)
+fn set_affinity(core_id: usize) -> Result<(), String> {
+    unsafe {
+        let mut set: cpu_set_t = mem::zeroed();
+        CPU_ZERO(&mut set);
+        CPU_SET(core_id, &mut set);
+
+        let pid: pid_t = 0; // 0 means "current thread"
+        let result = sched_setaffinity(pid, mem::size_of::<cpu_set_t>(), &set);
+
+        if result != 0 {
+            return Err(format!(
+                "sched_setaffinity failed with errno {}",
+                *libc::__errno_location()
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn print_cpuid_leaf(leaf: u32) {
     let cpuid = unsafe { __cpuid(leaf) };
@@ -58,7 +78,7 @@ fn max_extended_leaf() -> u32 {
     unsafe { __cpuid(0x80000000).eax }
 }
 
-fn tsc_frequency() -> Option<u64> {
+fn tsc_frequency(print: bool) -> Option<u64> {
     let max_leaf = max_extended_leaf();
     if max_leaf >= 0x15 {
         let cpuid = unsafe { __cpuid_count(0x15, 0) };
@@ -66,7 +86,9 @@ fn tsc_frequency() -> Option<u64> {
         let denom = cpuid.eax;
         let freq = cpuid.ecx;
 
-        eprintln!("freq: {freq}, numer: {numer}, denom: {denom}");
+        if print {
+            eprintln!("\tfreq: {freq}, numer: {numer}, denom: {denom}");
+        }
 
         // typically 25 or 100 MHz, change if necessary
         let base_freq = if freq != 0 { freq } else { 25_000_000u32 };
@@ -115,7 +137,7 @@ fn test_rdtsc() {
     eprintln!("✅ TSC Deadline Timer: {}", has_tsc_deadline_timer());
     eprintln!("✅ Virtual TSC scaling: {}", has_virtual_tsc_scaling());
 
-    match tsc_frequency() {
+    match tsc_frequency(false) {
         Some(freq) => eprintln!("✅ Reported TSC frequency: {} Hz", freq),
         None => eprintln!("❓ TSC frequency unavailable or must be estimated manually"),
     }
@@ -146,24 +168,24 @@ fn test_rdtsc() {
     }
 }
 
-fn get_tsc_frequency_khz() -> Option<u64> {
-    let path = "/sys/devices/system/cpu/cpu0/tsc_freq_khz";
-    let contents = fs::read_to_string(path).ok()?;
-    contents.trim().parse::<u64>().ok()
-}
-
 /// A tool to collect entropy from CPU timing information
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Enable hashing operation during timing measurement
-    #[cfg(feature = "hash")]
     #[arg(short = 'H', long)]
     hash: bool,
 
     /// Number of samples to collect
     #[arg(short, long, default_value_t = 1_000_000)]
     samples: usize,
+
+    #[cfg(target_arch = "x86_64")]
+    #[arg(short = 'R', long)]
+    use_rdtscp: bool,
+
+    #[arg(short = 'C', long)]
+    cpu: Option<usize>,
 }
 
 // rdtsc typically introduces more randomness, than rdtscp
@@ -180,7 +202,7 @@ pub fn rdtsc() -> u64 {
           "rdtsc",
           lateout("eax") eax,
           lateout("edx") edx,
-          options(nomem, nostack)
+          options(nomem, nostack, preserves_flags)
         );
     }
 
@@ -194,13 +216,15 @@ pub fn rdtsc() -> u64 {
 pub fn rdtscp() -> u64 {
     let eax: u32;
     let edx: u32;
+    let _aux: u32;
 
     unsafe {
         asm!(
           "rdtscp",
           lateout("eax") eax,
           lateout("edx") edx,
-          options(nomem, nostack)
+          lateout("ecx") _aux,
+          options(nomem, nostack, preserves_flags)
         );
     }
 
@@ -209,23 +233,15 @@ pub fn rdtscp() -> u64 {
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn get_nstime() -> u64 {
-    #[cfg(feature = "rdtscp")]
-    {
-        rdtscp()
-    }
-
-    #[cfg(not(feature = "rdtscp"))]
-    {
-        rdtsc()
-    }
+fn get_nstime(use_rdtscp: bool) -> u64 {
+    if use_rdtscp { rdtscp() } else { rdtsc() }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::similar_names)]
 #[inline(always)]
 #[must_use]
-pub fn get_nstime() -> u64 {
+pub fn get_nstime(_use_rdtscp: bool) -> u64 {
     let ticks: u64;
     unsafe {
         asm!(
@@ -237,7 +253,7 @@ pub fn get_nstime() -> u64 {
 }
 
 #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
-fn get_nstime() -> u64 {
+fn get_nstime(_use_rdtscp: bool) -> u64 {
     use std::time::Instant;
 
     static START_TIME: LazyLock<Instant> = LazyLock::new(|| Instant::now());
@@ -268,24 +284,24 @@ fn calculate_min_entropy(counts: &[usize; 256], total_samples: usize) -> f64 {
     -max_probability.log2()
 }
 
-fn measure_timer() {
-    let measure_iterations = 1_000_000;
-    let freq = match get_tsc_frequency_khz() {
-        Some(s) => (s as f64) * 1000.0,
-        None => 2800.0 * 1E6, // clock speed of my T470s. Change accordingly.
+fn measure_timer(use_rdtscp: bool) {
+    let measure_iterations = if use_rdtscp { 4 } else { 1_000_000 };
+    let freq = match tsc_frequency(true) {
+        Some(s) => s as f64,
+        None => 0f64,
     };
 
     let begin = Instant::now();
     for _ in 0..measure_iterations {
-        let _ = get_nstime();
+        let _ = get_nstime(use_rdtscp);
     }
     let duration = (Instant::now() - begin).as_secs_f64();
 
     let calls_per_sec = measure_iterations as f64 / duration;
 
-    eprintln!("get_nstime() calls per sec: {}", calls_per_sec);
+    eprintln!("\tget_nstime() calls per sec: {}", calls_per_sec);
     eprintln!(
-        "estimated get_nstime() latency: {}",
+        "\testimated get_nstime() latency: {}",
         freq as f64 / calls_per_sec
     );
 }
@@ -293,27 +309,46 @@ fn measure_timer() {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    if let Some(cpu) = args.cpu {
+        set_affinity(cpu).unwrap();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    let use_rdtscp = args.use_rdtscp;
+
     #[cfg(target_arch = "x86_64")]
     test_rdtsc();
 
-    measure_timer();
+    #[cfg(not(target_arch = "x86_64"))]
+    let use_rdtscp = false;
 
-    #[cfg(feature = "hash")]
+    #[cfg(target_arch = "x86_64")]
+    if args.use_rdtscp {
+        eprintln!("rdtscp:");
+    } else {
+        eprintln!("rdtsc:");
+    }
+    measure_timer(use_rdtscp);
+
+    eprintln!("measurements finished!");
+
+    io::stdout().flush().unwrap();
+    io::stderr().flush().unwrap();
+
     let mut hasher = Sha3_256::new();
 
     let mut counts = [0usize; 256];
     let total_samples = args.samples;
 
     for _ in 0..total_samples {
-        let a = get_nstime();
+        let a = get_nstime(use_rdtscp);
 
-        #[cfg(feature = "hash")]
         if args.hash {
             hasher.update(b"abc");
             let _ = hasher.finalize_reset();
         }
 
-        let b = get_nstime();
+        let b = get_nstime(use_rdtscp);
 
         if let Ok(diff) = u8::try_from((b - a) & 0xFF) {
             io::stdout().write_all(&diff.to_ne_bytes())?;
