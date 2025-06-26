@@ -16,12 +16,14 @@ use sha3::{Digest, Sha3_256};
 use std::fs;
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{__cpuid,__cpuid_count};
+use std::arch::x86_64::{__cpuid, __cpuid_count};
 
 fn print_cpuid_leaf(leaf: u32) {
     let cpuid = unsafe { __cpuid(leaf) };
-    eprintln!("CPUID[0x{:08x}] = eax={:08x}, ebx={:08x}, ecx={:08x}, edx={:08x}",
-             leaf, cpuid.eax, cpuid.ebx, cpuid.ecx, cpuid.edx);
+    eprintln!(
+        "CPUID[0x{:08x}] = eax={:08x}, ebx={:08x}, ecx={:08x}, edx={:08x}",
+        leaf, cpuid.eax, cpuid.ebx, cpuid.ecx, cpuid.edx
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -52,7 +54,6 @@ fn has_tsc_deadline_timer() -> bool {
     (cpuid.ecx & (1 << 24)) != 0
 }
 
-
 fn max_extended_leaf() -> u32 {
     unsafe { __cpuid(0x80000000).eax }
 }
@@ -61,20 +62,16 @@ fn tsc_frequency() -> Option<u64> {
     let max_leaf = max_extended_leaf();
     if max_leaf >= 0x15 {
         let cpuid = unsafe { __cpuid_count(0x15, 0) };
-        let denom = cpuid.ebx;
-        let numer = cpuid.eax;
+        let numer = cpuid.ebx;
+        let denom = cpuid.eax;
         let freq = cpuid.ecx;
 
+        eprintln!("freq: {freq}, numer: {numer}, denom: {denom}");
+
+        let base_freq = if freq != 0 { freq } else { 25_000_000u32 };
+
         if denom != 0 && numer != 0 {
-            if freq != 0 {
-                // freq is the TSC frequency in Hz (optional)
-                Some(freq as u64)
-            } else {
-                // Estimate frequency: (numer / denom) * reference clock
-                // Reference clock is often 24 or 25 MHz (platform dependent)
-                // For now, return as undefined
-                None
-            }
+            Some((base_freq as u64 * numer as u64) / denom as u64)
         } else {
             None
         }
@@ -123,11 +120,11 @@ fn test_rdtsc() {
     }
 
     eprintln!("\n🔍 Raw CPUID dumps for reference:");
-    print_cpuid_leaf(0x1);           // Basic info
-    print_cpuid_leaf(0x80000001);    // RDTSCP support
-    print_cpuid_leaf(0x80000007);    // Invariant TSC
-    print_cpuid_leaf(0x15);          // TSC frequency info (if supported)
-    print_cpuid_leaf(0x40000010);    // Virtual TSC scaling (if on a VM)
+    print_cpuid_leaf(0x1); // Basic info
+    print_cpuid_leaf(0x80000001); // RDTSCP support
+    print_cpuid_leaf(0x80000007); // Invariant TSC
+    print_cpuid_leaf(0x15); // TSC frequency info (if supported)
+    print_cpuid_leaf(0x40000010); // Virtual TSC scaling (if on a VM)
 
     let invariant = has_invariant_tsc();
     eprintln!("  Invariant TSC: {}", invariant);
